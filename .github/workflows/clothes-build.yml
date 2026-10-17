@@ -1,0 +1,87 @@
+name: 编译换装补丁版
+
+# 用法：放进 fork 仓库的 .github/workflows/ 下，然后 Actions 页面手动 Run。
+# 需要同仓库根目录存在 scripts/apply-clothes-patch.py。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "要编译的分支/标签（留空 = 当前分支）"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          lfs: false
+
+      - name: 安装 pnpm / Node
+        uses: pnpm/setup@v1
+        with:
+          runtime: node@26
+          cache: true
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust 缓存
+        uses: swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          workspaces: src-tauri
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 应用换装补丁
+        run: python scripts/apply-clothes-patch.py
+
+      - name: 导出改动 diff
+        shell: bash
+        run: git --no-pager diff --stat && git --no-pager diff > clothes-patch.diff
+
+      # 与仓库自带 dev-build.yml 保持一致：CI 上没有图标/资源，先造占位再生成。
+      - name: 准备资源
+        shell: bash
+        run: |
+          mkdir -p data/.official/game_data
+          mkdir -p data/third_party
+          touch data/.official/game_data/.gitkeep
+          touch data/third_party/.gitkeep
+          node scripts/prepare-desktop-resources.mjs
+          pip install Pillow
+          rm -rf ./src-tauri/icons/icon.png
+          python -c "from PIL import Image, ImageDraw; img=Image.new('RGB',(1024,1024),color='#4A90D9'); d=ImageDraw.Draw(img); d.ellipse((100,100,924,924), fill='#2C3E50'); img.save('./src-tauri/icons/icon.png')"
+          pnpm tauri icon ./src-tauri/icons/icon.png
+
+      # 先把类型错误挡在这里：比等 20 分钟打包完再报错划算得多。
+      - name: cargo check（类型自检）
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: 构建（release，不打包安装器）
+        env:
+          RUSTFLAGS: "-C linker=rust-lld"
+        run: |
+          pnpm build
+          pnpm tauri build --no-bundle
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: lingchat-clothes-windows
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/*.exe
+            src-tauri/target/release/bundle/**
+            clothes-patch.diff
